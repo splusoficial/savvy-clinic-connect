@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Offline — Secretária Plus</title>
+  <meta name="robots" content="noindex" />
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; padding: 2rem; display: grid; place-items: center; min-height: 100vh; background: #0b0b0b0a; }
+    .card { max-width: 480px; background: white; color: #111827; border: 1px solid #e5e7eb; border-radius: 16px; padding: 24px; box-shadow: 0 10px 30px -10px rgba(0,0,0,.15); }
+    @media (prefers-color-scheme: dark) {
+      body { background: #0b0b0b; }
+      .card { background: #0f1115; color: #e5e7eb; border-color: #1f2937; }
+    }
+    h1 { font-size: 1.25rem; margin: 0 0 .5rem; }
+    p { margin: 0 0 1rem; opacity: .8; }
+    a { display: inline-flex; gap: .5rem; align-items: center; text-decoration: none; padding: .625rem .9rem; border-radius: .625rem; border: 1px solid currentColor; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Você está offline</h1>
+    <p>Sem conexão no momento. Assim que a internet voltar, o app atualizará automaticamente.</p>
+    <a href="/">Tentar novamente</a>
+  </div>
+</body>
+</html>

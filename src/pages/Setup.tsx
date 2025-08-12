@@ -382,6 +382,14 @@ const Setup: React.FC = () => {
   const saveCodeEverywhere = async (codeToSave: string) => {
     debugLog('Salvando código em todos os storages', codeToSave);
     
+    // Limpa códigos antigos primeiro (importante para reinstalações)
+    try {
+      const oldCode = await findCodeAnywhere();
+      if (oldCode && oldCode !== codeToSave) {
+        debugLog('Limpando código antigo', oldCode);
+      }
+    } catch {}
+    
     // Salva em TODOS os lugares possíveis
     const promises = [
       writeInstallCodeToIDB(codeToSave),
@@ -466,8 +474,12 @@ const Setup: React.FC = () => {
         } catch (e: any) {
           console.error('exchange (installed + existingCode) error', e);
           
-          // Se falhar, mantém o código nos storages para retry
-          setError('Falha na ativação. Tente recarregar a página.');
+          // Mensagem de erro mais específica baseada no tipo de erro
+          if (e?.message?.includes('excedeu limite') || e?.message?.includes('expirado')) {
+            setError('Este código de ativação expirou ou já foi usado muitas vezes. Por favor, solicite um novo link de instalação.');
+          } else {
+            setError('Falha na ativação. Tente recarregar a página.');
+          }
           setStatus('');
           return;
         }
@@ -514,7 +526,13 @@ const Setup: React.FC = () => {
           return;
         } catch (e: any) {
           console.error('exchange (installed no code) error', e);
-          setError(e?.message || 'Não foi possível ativar seu acesso.');
+          
+          // Mensagem de erro mais específica
+          if (e?.message?.includes('excedeu limite') || e?.message?.includes('expirado')) {
+            setError('Este código de ativação expirou ou já foi usado muitas vezes. Por favor, solicite um novo link de instalação.');
+          } else {
+            setError(e?.message || 'Não foi possível ativar seu acesso.');
+          }
           setStatus('');
           return;
         }
@@ -547,8 +565,12 @@ const Setup: React.FC = () => {
           }
 
           const newCode = (data as any).code as string;
+          const isReused = (data as any).reused === true;
           setCode(newCode);
-          debugLog('Novo código gerado', newCode);
+          debugLog(isReused ? 'Código existente reutilizado' : 'Novo código gerado', newCode);
+          
+          // Limpa flag de tentativa anterior se existir
+          try { localStorage.removeItem(RECOVERY_ATTEMPT_KEY); } catch {}
 
           // Salva em TODOS os storages
           await saveCodeEverywhere(newCode);

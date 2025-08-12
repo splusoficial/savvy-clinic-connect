@@ -1,4 +1,3 @@
-
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '@/integrations/supabase/client';
@@ -12,25 +11,13 @@ import logoBase from '@/assets/logo-base.png';
 import loaderWebp from '@/assets/loader.webp';
 import logoSvg from '@/assets/logo.svg';
 
-/**
- * Fluxo:
- * - Safari abre /setup?email=...&name=...&wh_id=...&inst=...
- *   -> chama generate-link (flow=create-install) -> recebe { code }
- *   -> salva {code,ts} no CacheStorage ('install-bridge' => '/__install_code')
- *   -> troca URL pra /setup?code=...
- *   -> usuário adiciona à tela inicial
- * - PWA abre /setup (sem ?code) -> busca no CacheStorage -> se achar {code}
- *   -> chama generate-link (flow=exchange-install) -> recebe { email, email_otp }
- *   -> supabase.auth.verifyOtp(...) -> sucesso -> limpa cache/cookie/LS -> navega '/'
- */
-
 const FUNCTION_NAME = 'generate-link';
-const STORAGE_KEY = 'install_code'; // fallback leve
-const COOKIE_KEY = 'install_code';  // fallback leve
+const STORAGE_KEY = 'install_code';
+const COOKIE_KEY = 'install_code';
 const CACHE_NAME = 'install-bridge';
 const CACHE_REQ = '/__install_code';
 
-/** IndexedDB para install_code (mais estável que CacheStorage no iOS) */
+// IndexedDB para install_code
 const IDB_DB = 'sp-install-db';
 const IDB_STORE = 'kv';
 const IDB_KEY = 'install_code';
@@ -74,7 +61,6 @@ async function writeInstallCodeToIDB(code: string) {
   await idbSetInstall({ code, ts: Date.now() });
 }
 
-/** Lê do IDB (não consome). Usa TTL grande; a edge valida TTL/uses. */
 async function readInstallCodeFromIDB(maxAgeMs = 90 * 24 * 60 * 60 * 1000): Promise<string | null> {
   try {
     const rec = await idbGetInstall();
@@ -86,8 +72,7 @@ async function readInstallCodeFromIDB(maxAgeMs = 90 * 24 * 60 * 60 * 1000): Prom
   }
 }
 
-
-/** Helpers básicos de cookie (fallback) */
+// Cookie helpers
 function setCookie(name: string, value: string, minutes = 30) {
   const expires = new Date(Date.now() + minutes * 60_000).toUTCString();
   document.cookie = `${name}=${encodeURIComponent(value)}; Expires=${expires}; Path=/; SameSite=Lax`;
@@ -108,7 +93,7 @@ function deleteCookie(name: string) {
   document.cookie = `${name}=; Expires=Thu, 01 Jan 1970 00:00:01 GMT; Path=/; SameSite=Lax`;
 }
 
-/** Ponte via Cache Storage */
+// Cache Storage
 async function writeInstallCodeToCache(code: string) {
   try {
     const cache = await caches.open(CACHE_NAME);
@@ -133,36 +118,72 @@ async function readAndConsumeInstallCodeFromCache(maxAgeMs = 10 * 60 * 1000): Pr
   }
 }
 
-/** Detectar se está em standalone (PWA) */
+// CORREÇÃO PRINCIPAL: Detectar PWA com valor inicial correto
 function useIsInstalled() {
-  const [installed, setInstalled] = useState(false);
+  // Função de detecção que funciona síncronamente
+  const checkInstalled = () => {
+    if (typeof window === 'undefined') return false;
+    
+    // iOS Safari standalone
+    if ((navigator as any).standalone === true) return true;
+    
+    // Padrão PWA (Android/Chrome/Edge)
+    if (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) return true;
+    
+    // iOS PWA via URL (fallback adicional)
+    if (window.matchMedia && window.matchMedia('(display-mode: fullscreen)').matches) return true;
+    
+    return false;
+  };
+
+  // IMPORTANTE: Inicializa com o valor correto já no primeiro render
+  const [installed, setInstalled] = useState(() => checkInstalled());
+  const [initialized, setInitialized] = useState(false);
+
   useEffect(() => {
-    const check = () =>
-      (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
-      // iOS fallback:
-      (typeof (navigator as any).standalone !== 'undefined' && (navigator as any).standalone === true);
-    setInstalled(check());
-    const handler = () => setInstalled(check());
+    // Revalida após montagem para garantir
+    const isInstalled = checkInstalled();
+    setInstalled(isInstalled);
+    setInitialized(true);
+
+    // Listener para mudanças (raro mas possível)
+    const handler = () => {
+      setInstalled(checkInstalled());
+    };
+    
     window.addEventListener('visibilitychange', handler);
-    return () => window.removeEventListener('visibilitychange', handler);
+    window.addEventListener('focus', handler);
+    
+    // Recheck após um pequeno delay (iOS às vezes demora)
+    const timer = setTimeout(() => {
+      setInstalled(checkInstalled());
+    }, 100);
+
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('visibilitychange', handler);
+      window.removeEventListener('focus', handler);
+    };
   }, []);
-  return installed;
+
+  return { installed, initialized };
 }
 
-/** Detectar se está no iOS */
+// Detectar iOS
 function useIsIOS() {
   const [isIOS, setIsIOS] = useState(false);
   useEffect(() => {
     const checkIOS = () => {
       const ua = navigator.userAgent;
-      return /iPad|iPhone|iPod/.test(ua);
+      return /iPad|iPhone|iPod/.test(ua) || 
+             ((navigator as any)?.platform === 'MacIntel' && (navigator as any)?.maxTouchPoints > 1);
     };
     setIsIOS(checkIOS());
   }, []);
   return isIOS;
 }
 
-/** Detectar se está no Android */
+// Detectar Android
 function useIsAndroid() {
   const [isAndroid, setIsAndroid] = useState(false);
   useEffect(() => {
@@ -177,7 +198,7 @@ function useIsAndroid() {
 
 const Setup: React.FC = () => {
   const navigate = useNavigate();
-  const installed = useIsInstalled();
+  const { installed, initialized } = useIsInstalled();
   const isIOS = useIsIOS();
   const isAndroid = useIsAndroid();
   const [status, setStatus] = useState<string>('');
@@ -185,26 +206,27 @@ const Setup: React.FC = () => {
   const [code, setCode] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const exchangingRef = useRef(false);
+  const processedRef = useRef(false); // Evita processamento duplo
 
   const params = useMemo(() => new URLSearchParams(window.location.search), []);
   const existingCode = params.get('code');
 
-const { isReady } = useOneSignal();
+  const { isReady } = useOneSignal();
 
-// Preload assets for faster UI paint (logo, loader)
-useEffect(() => {
-  try {
-    const assets = [loaderWebp, logoSvg, appleShareIcon, iphoneTutorial, logoBase];
-    assets.forEach((src) => {
-      const img = new Image();
-      img.decoding = 'async';
-      img.loading = 'eager';
-      img.src = src;
-    });
-  } catch {}
-}, []);
+  // Preload assets
+  useEffect(() => {
+    try {
+      const assets = [loaderWebp, logoSvg, appleShareIcon, iphoneTutorial, logoBase];
+      assets.forEach((src) => {
+        const img = new Image();
+        img.decoding = 'async';
+        img.loading = 'eager';
+        img.src = src;
+      });
+    } catch {}
+  }, []);
 
-const extendUntilPushReady = async (timeoutMs = 10000) => {
+  const extendUntilPushReady = async (timeoutMs = 10000) => {
     const phrases = [
       'Configurando seu Aplicativo.',
       'Puxando seus dados',
@@ -218,7 +240,7 @@ const extendUntilPushReady = async (timeoutMs = 10000) => {
       setStatus(phrases[i]);
     }, 2000);
     const start = Date.now();
-    const minMs = 4000; // splash mínima de 4s
+    const minMs = 4000;
     try {
       while (!isReady() && Date.now() - start < timeoutMs) {
         await new Promise((r) => setTimeout(r, 300));
@@ -232,9 +254,7 @@ const extendUntilPushReady = async (timeoutMs = 10000) => {
     }
   };
 
-  // Troca code -> OTP -> login
   const exchangeInstall = async (theCode: string) => {
-    // Chama edge function para gerar email + email_otp (flow=exchange-install)
     const search = new URLSearchParams({
       flow: 'exchange-install',
       code: theCode,
@@ -248,46 +268,50 @@ const extendUntilPushReady = async (timeoutMs = 10000) => {
     const email = (data as any).email as string;
     const token = (data as any).email_otp as string;
 
-    // Conclui o login no Supabase
     const { error: vErr } = await (supabase.auth as any).verifyOtp({ email, token, type: 'email' });
     if (vErr) throw vErr;
 
-    // Aguarda a sessão persistir localmente antes de seguir
-    try {
-      for (let i = 0; i < 40; i++) {
-        const { data: { session } } = await (supabase.auth as any).getSession();
-        if (session) break;
-        await new Promise((r) => setTimeout(r, 100));
-      }
-    } catch {}
+    // Aguarda sessão persistir
+    for (let i = 0; i < 40; i++) {
+      const { data: { session } } = await (supabase.auth as any).getSession();
+      if (session) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
 
-    // Backup dos tokens para resiliência em iOS PWA
+    // Backup dos tokens
     try {
       const { data: { session } } = await (supabase.auth as any).getSession();
       if (session) await persistAuthBackup(session);
     } catch {}
-
   };
 
   useEffect(() => {
-    (async () => {
-      setError('');
-      // Se já existe sessão válida, não precisa de ativação
-try {
-  const { data: { session } } = await (supabase.auth as any).getSession();
-  if (session) {
-    await persistAuthBackup(session); // reforça backup
-    navigate('/');
-    return;
-  }
-} catch {}
+    // IMPORTANTE: Aguarda a detecção de PWA estar inicializada
+    if (!initialized) return;
+    
+    // Evita processamento duplo
+    if (processedRef.current) return;
 
-      // Caso 1: Já instalado E já veio com ?code=...
+    (async () => {
+      processedRef.current = true;
+      setError('');
+
+      // Verifica sessão existente primeiro
+      try {
+        const { data: { session } } = await (supabase.auth as any).getSession();
+        if (session) {
+          await persistAuthBackup(session);
+          navigate('/');
+          return;
+        }
+      } catch {}
+
+      // CASO 1: PWA instalado com código na URL
       if (installed && existingCode && !exchangingRef.current) {
         try {
           exchangingRef.current = true;
           setStatus('Ativando seu acesso...');
-          await writeInstallCodeToIDB(existingCode); // salva o code também neste caminho
+          await writeInstallCodeToIDB(existingCode);
           await exchangeInstall(existingCode);
           try { localStorage.removeItem(STORAGE_KEY); } catch {}
           try { deleteCookie(COOKIE_KEY); } catch {}
@@ -302,7 +326,44 @@ try {
         }
       }
 
-      // Caso 2: NÃO instalado E sem code -> criar code e fixar URL + gravar na ponte (Cache Storage)
+      // CASO 2: PWA instalado SEM código na URL - buscar no storage
+      if (installed && !existingCode && !exchangingRef.current) {
+        try {
+          setStatus('Verificando dados de ativação…');
+          
+          // Busca código em todos os storages
+          const fromIDB = await readInstallCodeFromIDB();
+          const fromCache = await readAndConsumeInstallCodeFromCache();
+          const fromCookie = getCookie(COOKIE_KEY);
+          const fromLS = localStorage.getItem(STORAGE_KEY);
+          
+          const candidate = fromIDB || fromCache || fromCookie || fromLS;
+
+          if (candidate) {
+            exchangingRef.current = true;
+            setStatus('Ativando seu acesso...');
+            await writeInstallCodeToIDB(candidate);
+            await exchangeInstall(candidate);
+            try { localStorage.removeItem(STORAGE_KEY); } catch {}
+            try { deleteCookie(COOKIE_KEY); } catch {}
+            await extendUntilPushReady(10000);
+            navigate('/');
+            return;
+          }
+
+          // Nenhum código encontrado
+          setStatus('');
+          setError('App instalado mas sem código de ativação. Por favor, abra novamente o link de configuração recebido.');
+          return;
+        } catch (e: any) {
+          console.error('exchange (installed no code) error', e);
+          setError(e?.message || 'Não foi possível ativar seu acesso.');
+          setStatus('');
+          return;
+        }
+      }
+
+      // CASO 3: NÃO instalado e SEM código - criar novo código
       if (!installed && !existingCode) {
         const email = params.get('email');
         const name = params.get('name') || undefined;
@@ -331,18 +392,13 @@ try {
           const newCode = (data as any).code as string;
           setCode(newCode);
 
-          // PONTE: grava também no IndexedDB (principal no iOS)
-await writeInstallCodeToIDB(newCode);
-
-// Mantém Cache como fallback
-await writeInstallCodeToCache(newCode);
-
-// Fallbacks leves ...
-
+          // Salva em todos os storages
+          await writeInstallCodeToIDB(newCode);
+          await writeInstallCodeToCache(newCode);
           try { setCookie(COOKIE_KEY, newCode, 30); } catch {}
           try { localStorage.setItem(STORAGE_KEY, newCode); } catch {}
 
-          // Fixa URL com code para facilitar reabertura no Safari também
+          // Fixa URL com código
           const newUrl = `${window.location.origin}/setup?code=${encodeURIComponent(newCode)}`;
           window.location.replace(newUrl);
           return;
@@ -355,48 +411,15 @@ await writeInstallCodeToCache(newCode);
         }
       }
 
-      // Caso 3: Instalado, mas sem ?code=... -> buscar na PONTE (CacheStorage) primeiro
-      if (installed && !existingCode && !exchangingRef.current) {
-        try {
-          setStatus('Verificando dados de ativação…');
-          // Ordem: IndexedDB (principal) -> CacheStorage (fallback) -> cookie -> localStorage
-const fromIDB = await readInstallCodeFromIDB();              // não consome
-const fromCache = await readAndConsumeInstallCodeFromCache(); // fallback
-const candidate =
-  fromIDB ||
-  fromCache ||
-  (() => { try { return getCookie(COOKIE_KEY); } catch { return null; } })() ||
-  (() => { try { return localStorage.getItem(STORAGE_KEY) || null; } catch { return null; } })();
-
-
-          if (candidate) {
-            exchangingRef.current = true;
-            setStatus('Ativando seu acesso...');
-            await writeInstallCodeToIDB(candidate); // garante o code no storage do PWA
-            await exchangeInstall(candidate);
-            try { localStorage.removeItem(STORAGE_KEY); } catch {}
-            try { deleteCookie(COOKIE_KEY); } catch {}
-            await extendUntilPushReady(10000);
-            navigate('/');
-            return;
-          }
-
-          // Nada encontrado
-          setStatus('');
-          setError('Instalado, mas sem código de ativação. Abra novamente o link de configuração para concluir.');
-          return;
-        } catch (e: any) {
-          console.error('exchange (installed no code) error', e);
-          setError(e?.message || 'Não foi possível ativar seu acesso.');
-          setStatus('');
-          return;
-        }
+      // CASO 4: NÃO instalado MAS com código na URL (aguardando instalação)
+      if (!installed && existingCode) {
+        // Apenas mantém o código visível, esperando o usuário instalar
+        setCode(existingCode);
       }
     })();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [installed]);
+  }, [initialized, installed, existingCode]); // Dependências controladas
 
-  // Se está carregando (instalado com status), mostra splash screen
+  // Loading screen para PWA
   if (installed && status && !error) {
     return (
       <div className="h-screen bg-white flex flex-col items-center justify-center overflow-hidden" style={{ height: '100vh', overflow: 'hidden', backgroundColor: '#fff' }}>
@@ -410,9 +433,24 @@ const candidate =
       </div>
     );
   }
-  
-  // Splash while generating activation code before installation
+
+  // Loading screen para geração de código
   if (!installed && !error && !existingCode && generating) {
+    return (
+      <div className="h-screen bg-white flex flex-col items-center justify-center overflow-hidden" style={{ height: '100vh', overflow: 'hidden', backgroundColor: '#fff' }}>
+        <img 
+          src={loaderWebp} 
+          alt="Carregando"
+          loading="eager"
+          fetchPriority="high"
+          className="w-[100px] h-[100px] object-contain"
+        />
+      </div>
+    );
+  }
+
+  // Aguardando inicialização da detecção de PWA
+  if (!initialized && !error) {
     return (
       <div className="h-screen bg-white flex flex-col items-center justify-center overflow-hidden" style={{ height: '100vh', overflow: 'hidden', backgroundColor: '#fff' }}>
         <img 
@@ -428,7 +466,6 @@ const candidate =
 
   return (
     <div className="h-screen bg-background flex flex-col items-center justify-center p-4 space-y-3 overflow-hidden" style={{ height: '100vh', overflow: 'hidden' }}>
-      {/* Logo */}
       <div className="flex justify-center mb-1">
         <img 
           src={logoBase} 
@@ -437,11 +474,9 @@ const candidate =
         />
       </div>
 
-      {/* Box principal */}
       <div className="w-full max-w-md rounded-xl border bg-card text-card-foreground shadow-sm p-5">
         {!error ? (
           <>
-            {/* Título dentro do box */}
             <h1 className="text-lg font-semibold text-center mb-4">
               {installed ? 'Ativando acesso…' : 'Adicione o app à Tela de Início'}
             </h1>
@@ -522,7 +557,6 @@ const candidate =
         )}
       </div>
 
-      {/* Imagem tutorial */}
       {!installed && isIOS && (
         <div className="w-full max-w-xs mt-2">
           <img 

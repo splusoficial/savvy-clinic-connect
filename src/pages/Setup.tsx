@@ -17,44 +17,67 @@ const COOKIE_KEY = 'install_code';
 const CACHE_NAME = 'install-bridge';
 const CACHE_REQ = '/__install_code';
 
+// NOVA: Chave para marcar que já tentamos recuperar
+const RECOVERY_ATTEMPT_KEY = 'install_code_recovery_attempted';
+
 // IndexedDB para install_code
 const IDB_DB = 'sp-install-db';
 const IDB_STORE = 'kv';
 const IDB_KEY = 'install_code';
 
+// Debug helper
+const debugLog = (msg: string, data?: any) => {
+  console.log(`[Setup] ${msg}`, data || '');
+};
+
 function openInstallIDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(IDB_DB, 1);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error || new Error('IDB open error'));
+    try {
+      const req = indexedDB.open(IDB_DB, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error('IDB open error'));
+    } catch (e) {
+      reject(e);
+    }
   });
 }
 
 async function idbSetInstall(value: { code: string; ts: number }) {
-  const db = await openInstallIDB();
-  await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(IDB_STORE, 'readwrite');
-    const req = tx.objectStore(IDB_STORE).put(value, IDB_KEY);
-    req.onsuccess = () => resolve();
-    req.onerror = () => reject(req.error || new Error('IDB put error'));
-  });
-  db.close();
+  try {
+    const db = await openInstallIDB();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      const req = tx.objectStore(IDB_STORE).put(value, IDB_KEY);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error || new Error('IDB put error'));
+    });
+    db.close();
+    debugLog('IDB: Código salvo', value.code);
+  } catch (e) {
+    debugLog('IDB: Erro ao salvar', e);
+  }
 }
 
 async function idbGetInstall(): Promise<{ code: string; ts: number } | undefined> {
-  const db = await openInstallIDB();
-  const out = await new Promise<{ code: string; ts: number } | undefined>((resolve, reject) => {
-    const tx = db.transaction(IDB_STORE, 'readonly');
-    const req = tx.objectStore(IDB_STORE).get(IDB_KEY);
-    req.onsuccess = () => resolve(req.result as any);
-    req.onerror = () => reject(req.error || new Error('IDB get error'));
-  });
-  db.close();
-  return out;
+  try {
+    const db = await openInstallIDB();
+    const out = await new Promise<{ code: string; ts: number } | undefined>((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readonly');
+      const req = tx.objectStore(IDB_STORE).get(IDB_KEY);
+      req.onsuccess = () => resolve(req.result as any);
+      req.onerror = () => reject(req.error || new Error('IDB get error'));
+    });
+    db.close();
+    debugLog('IDB: Código lido', out?.code);
+    return out;
+  } catch (e) {
+    debugLog('IDB: Erro ao ler', e);
+    return undefined;
+  }
 }
 
 async function writeInstallCodeToIDB(code: string) {
@@ -73,24 +96,37 @@ async function readInstallCodeFromIDB(maxAgeMs = 90 * 24 * 60 * 60 * 1000): Prom
 }
 
 // Cookie helpers
-function setCookie(name: string, value: string, minutes = 30) {
-  const expires = new Date(Date.now() + minutes * 60_000).toUTCString();
-  document.cookie = `${name}=${encodeURIComponent(value)}; Expires=${expires}; Path=/; SameSite=Lax`;
+function setCookie(name: string, value: string, days = 7) {
+  try {
+    const expires = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toUTCString();
+    document.cookie = `${name}=${encodeURIComponent(value)}; Expires=${expires}; Path=/; SameSite=None; Secure`;
+    debugLog('Cookie: Salvo', value);
+  } catch (e) {
+    debugLog('Cookie: Erro ao salvar', e);
+  }
 }
+
 function getCookie(name: string): string | null {
   try {
     const parts = (document.cookie || '').split('; ');
     for (const part of parts) {
       const [k, ...rest] = part.split('=');
-      if (k === name) return decodeURIComponent(rest.join('='));
+      if (k === name) {
+        const val = decodeURIComponent(rest.join('='));
+        debugLog('Cookie: Lido', val);
+        return val;
+      }
     }
     return null;
   } catch {
     return null;
   }
 }
+
 function deleteCookie(name: string) {
-  document.cookie = `${name}=; Expires=Thu, 01 Jan 1970 00:00:01 GMT; Path=/; SameSite=Lax`;
+  try {
+    document.cookie = `${name}=; Expires=Thu, 01 Jan 1970 00:00:01 GMT; Path=/; SameSite=None; Secure`;
+  } catch {}
 }
 
 // Cache Storage
@@ -101,60 +137,113 @@ async function writeInstallCodeToCache(code: string) {
     await cache.put(CACHE_REQ, new Response(JSON.stringify(payload), {
       headers: { 'content-type': 'application/json', 'cache-control': 'no-store' }
     }));
-  } catch {}
+    debugLog('Cache: Salvo', code);
+  } catch (e) {
+    debugLog('Cache: Erro ao salvar', e);
+  }
 }
-async function readAndConsumeInstallCodeFromCache(maxAgeMs = 10 * 60 * 1000): Promise<string | null> {
+
+async function readAndConsumeInstallCodeFromCache(maxAgeMs = 90 * 24 * 60 * 60 * 1000): Promise<string | null> {
   try {
     const cache = await caches.open(CACHE_NAME);
     const res = await cache.match(CACHE_REQ);
     if (!res) return null;
     const { code, ts } = await res.json();
-    await cache.delete(CACHE_REQ);
+    // NÃO deletar mais para permitir múltiplas tentativas
+    // await cache.delete(CACHE_REQ); 
     if (!code) return null;
     if (typeof ts === 'number' && Date.now() - ts > maxAgeMs) return null;
+    debugLog('Cache: Lido', code);
     return String(code);
+  } catch (e) {
+    debugLog('Cache: Erro ao ler', e);
+    return null;
+  }
+}
+
+// LocalStorage helpers
+function setLocalStorage(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+    debugLog('LS: Salvo', value);
+  } catch (e) {
+    debugLog('LS: Erro ao salvar', e);
+  }
+}
+
+function getLocalStorage(key: string): string | null {
+  try {
+    const val = localStorage.getItem(key);
+    if (val) debugLog('LS: Lido', val);
+    return val;
   } catch {
     return null;
   }
 }
 
-// CORREÇÃO PRINCIPAL: Detectar PWA com valor inicial correto
+// SessionStorage como fallback adicional
+function setSessionStorage(key: string, value: string) {
+  try {
+    sessionStorage.setItem(key, value);
+    debugLog('Session: Salvo', value);
+  } catch (e) {
+    debugLog('Session: Erro ao salvar', e);
+  }
+}
+
+function getSessionStorage(key: string): string | null {
+  try {
+    const val = sessionStorage.getItem(key);
+    if (val) debugLog('Session: Lido', val);
+    return val;
+  } catch {
+    return null;
+  }
+}
+
+// Detectar PWA com valor inicial correto
 function useIsInstalled() {
-  // Função de detecção que funciona síncronamente
   const checkInstalled = () => {
     if (typeof window === 'undefined') return false;
     
     // iOS Safari standalone
     if ((navigator as any).standalone === true) return true;
     
-    // Padrão PWA (Android/Chrome/Edge)
+    // Padrão PWA
     if (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) return true;
-    
-    // iOS PWA via URL (fallback adicional)
     if (window.matchMedia && window.matchMedia('(display-mode: fullscreen)').matches) return true;
+    
+    // iOS 18 às vezes usa minimal-ui
+    if (window.matchMedia && window.matchMedia('(display-mode: minimal-ui)').matches) {
+      // Verifica se veio de uma instalação (não tem referrer do Safari)
+      if (!document.referrer || !document.referrer.includes('safari')) {
+        return true;
+      }
+    }
     
     return false;
   };
 
-  // IMPORTANTE: Inicializa com o valor correto já no primeiro render
   const [installed, setInstalled] = useState(() => checkInstalled());
   const [initialized, setInitialized] = useState(false);
 
   useEffect(() => {
-    // Revalida após montagem para garantir
     const isInstalled = checkInstalled();
     setInstalled(isInstalled);
     setInitialized(true);
+    debugLog('PWA detectado?', isInstalled);
 
-    // Listener para mudanças (raro mas possível)
     const handler = () => {
-      setInstalled(checkInstalled());
+      const newState = checkInstalled();
+      if (newState !== installed) {
+        debugLog('PWA estado mudou para', newState);
+        setInstalled(newState);
+      }
     };
     
     window.addEventListener('visibilitychange', handler);
     window.addEventListener('focus', handler);
     
-    // Recheck após um pequeno delay (iOS às vezes demora)
     const timer = setTimeout(() => {
       setInstalled(checkInstalled());
     }, 100);
@@ -164,7 +253,7 @@ function useIsInstalled() {
       window.removeEventListener('visibilitychange', handler);
       window.removeEventListener('focus', handler);
     };
-  }, []);
+  }, [installed]);
 
   return { installed, initialized };
 }
@@ -206,7 +295,7 @@ const Setup: React.FC = () => {
   const [code, setCode] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const exchangingRef = useRef(false);
-  const processedRef = useRef(false); // Evita processamento duplo
+  const processedRef = useRef(false);
 
   const params = useMemo(() => new URLSearchParams(window.location.search), []);
   const existingCode = params.get('code');
@@ -255,6 +344,7 @@ const Setup: React.FC = () => {
   };
 
   const exchangeInstall = async (theCode: string) => {
+    debugLog('Iniciando troca do código', theCode);
     const search = new URLSearchParams({
       flow: 'exchange-install',
       code: theCode,
@@ -267,6 +357,7 @@ const Setup: React.FC = () => {
 
     const email = (data as any).email as string;
     const token = (data as any).email_otp as string;
+    debugLog('OTP recebido para', email);
 
     const { error: vErr } = await (supabase.auth as any).verifyOtp({ email, token, type: 'email' });
     if (vErr) throw vErr;
@@ -283,44 +374,100 @@ const Setup: React.FC = () => {
       const { data: { session } } = await (supabase.auth as any).getSession();
       if (session) await persistAuthBackup(session);
     } catch {}
+    
+    debugLog('Login concluído com sucesso');
+  };
+
+  // Função para salvar código em TODOS os storages
+  const saveCodeEverywhere = async (codeToSave: string) => {
+    debugLog('Salvando código em todos os storages', codeToSave);
+    
+    // Salva em TODOS os lugares possíveis
+    const promises = [
+      writeInstallCodeToIDB(codeToSave),
+      writeInstallCodeToCache(codeToSave),
+    ];
+    
+    // Síncronos
+    try { setCookie(COOKIE_KEY, codeToSave, 7); } catch {}
+    try { setLocalStorage(STORAGE_KEY, codeToSave); } catch {}
+    try { setSessionStorage(STORAGE_KEY, codeToSave); } catch {}
+    
+    // Aguarda assíncronos
+    await Promise.allSettled(promises);
+  };
+
+  // Função para buscar código de QUALQUER storage
+  const findCodeAnywhere = async (): Promise<string | null> => {
+    debugLog('Buscando código em todos os storages...');
+    
+    // Tenta todos em paralelo
+    const [fromIDB, fromCache] = await Promise.all([
+      readInstallCodeFromIDB(),
+      readAndConsumeInstallCodeFromCache(),
+    ]);
+    
+    const fromCookie = getCookie(COOKIE_KEY);
+    const fromLS = getLocalStorage(STORAGE_KEY);
+    const fromSession = getSessionStorage(STORAGE_KEY);
+    
+    const candidate = fromIDB || fromCache || fromCookie || fromLS || fromSession;
+    
+    debugLog('Código encontrado?', candidate ? 'SIM' : 'NÃO');
+    return candidate;
   };
 
   useEffect(() => {
-    // IMPORTANTE: Aguarda a detecção de PWA estar inicializada
     if (!initialized) return;
-    
-    // Evita processamento duplo
     if (processedRef.current) return;
 
     (async () => {
       processedRef.current = true;
       setError('');
+      
+      debugLog('Iniciando Setup', {
+        installed,
+        existingCode,
+        userAgent: navigator.userAgent,
+        isIOS,
+      });
 
       // Verifica sessão existente primeiro
       try {
         const { data: { session } } = await (supabase.auth as any).getSession();
         if (session) {
+          debugLog('Sessão existente encontrada');
           await persistAuthBackup(session);
           navigate('/');
           return;
         }
       } catch {}
 
-      // CASO 1: PWA instalado com código na URL
+      // CASO 1: PWA instalado com código na URL (sempre tenta usar)
       if (installed && existingCode && !exchangingRef.current) {
         try {
           exchangingRef.current = true;
           setStatus('Ativando seu acesso...');
-          await writeInstallCodeToIDB(existingCode);
+          
+          // Salva o código em TODOS os storages para futuras tentativas
+          await saveCodeEverywhere(existingCode);
+          
           await exchangeInstall(existingCode);
+          
+          // Limpa após sucesso
           try { localStorage.removeItem(STORAGE_KEY); } catch {}
+          try { sessionStorage.removeItem(STORAGE_KEY); } catch {}
           try { deleteCookie(COOKIE_KEY); } catch {}
+          try { localStorage.setItem(RECOVERY_ATTEMPT_KEY, 'success'); } catch {}
+          
           await extendUntilPushReady(10000);
           navigate('/');
           return;
         } catch (e: any) {
           console.error('exchange (installed + existingCode) error', e);
-          setError(e?.message || 'Não foi possível ativar seu acesso.');
+          
+          // Se falhar, mantém o código nos storages para retry
+          setError('Falha na ativação. Tente recarregar a página.');
           setStatus('');
           return;
         }
@@ -331,29 +478,39 @@ const Setup: React.FC = () => {
         try {
           setStatus('Verificando dados de ativação…');
           
-          // Busca código em todos os storages
-          const fromIDB = await readInstallCodeFromIDB();
-          const fromCache = await readAndConsumeInstallCodeFromCache();
-          const fromCookie = getCookie(COOKIE_KEY);
-          const fromLS = localStorage.getItem(STORAGE_KEY);
-          
-          const candidate = fromIDB || fromCache || fromCookie || fromLS;
+          const candidate = await findCodeAnywhere();
 
           if (candidate) {
             exchangingRef.current = true;
             setStatus('Ativando seu acesso...');
-            await writeInstallCodeToIDB(candidate);
+            
+            // Re-salva em todos os storages (caso algum tenha falhado antes)
+            await saveCodeEverywhere(candidate);
+            
             await exchangeInstall(candidate);
+            
+            // Limpa após sucesso
             try { localStorage.removeItem(STORAGE_KEY); } catch {}
+            try { sessionStorage.removeItem(STORAGE_KEY); } catch {}
             try { deleteCookie(COOKIE_KEY); } catch {}
+            try { localStorage.setItem(RECOVERY_ATTEMPT_KEY, 'success'); } catch {}
+            
             await extendUntilPushReady(10000);
             navigate('/');
             return;
           }
 
-          // Nenhum código encontrado
+          // Verifica se já tentamos e falhamos antes
+          const previousAttempt = localStorage.getItem(RECOVERY_ATTEMPT_KEY);
+          if (previousAttempt === 'failed') {
+            setError('Não foi possível recuperar o código de ativação. Por favor, desinstale o app e use o link de configuração novamente.');
+          } else {
+            // Marca como tentativa falhada
+            try { localStorage.setItem(RECOVERY_ATTEMPT_KEY, 'failed'); } catch {}
+            setError('App instalado mas sem código de ativação. Por favor, copie o link completo com o código e abra novamente no Safari antes de abrir o app.');
+          }
+          
           setStatus('');
-          setError('App instalado mas sem código de ativação. Por favor, abra novamente o link de configuração recebido.');
           return;
         } catch (e: any) {
           console.error('exchange (installed no code) error', e);
@@ -391,12 +548,10 @@ const Setup: React.FC = () => {
 
           const newCode = (data as any).code as string;
           setCode(newCode);
+          debugLog('Novo código gerado', newCode);
 
-          // Salva em todos os storages
-          await writeInstallCodeToIDB(newCode);
-          await writeInstallCodeToCache(newCode);
-          try { setCookie(COOKIE_KEY, newCode, 30); } catch {}
-          try { localStorage.setItem(STORAGE_KEY, newCode); } catch {}
+          // Salva em TODOS os storages
+          await saveCodeEverywhere(newCode);
 
           // Fixa URL com código
           const newUrl = `${window.location.origin}/setup?code=${encodeURIComponent(newCode)}`;
@@ -411,13 +566,15 @@ const Setup: React.FC = () => {
         }
       }
 
-      // CASO 4: NÃO instalado MAS com código na URL (aguardando instalação)
+      // CASO 4: NÃO instalado MAS com código na URL
       if (!installed && existingCode) {
-        // Apenas mantém o código visível, esperando o usuário instalar
+        // Salva o código preventivamente em todos os storages
+        await saveCodeEverywhere(existingCode);
         setCode(existingCode);
+        debugLog('Código salvo preventivamente', existingCode);
       }
     })();
-  }, [initialized, installed, existingCode]); // Dependências controladas
+  }, [initialized, installed, existingCode]);
 
   // Loading screen para PWA
   if (installed && status && !error) {
@@ -449,7 +606,7 @@ const Setup: React.FC = () => {
     );
   }
 
-  // Aguardando inicialização da detecção de PWA
+  // Aguardando inicialização
   if (!initialized && !error) {
     return (
       <div className="h-screen bg-white flex flex-col items-center justify-center overflow-hidden" style={{ height: '100vh', overflow: 'hidden', backgroundColor: '#fff' }}>
@@ -533,9 +690,13 @@ const Setup: React.FC = () => {
                   </div>
                 )}
                 {code && !installed && (
-                  <p className="mt-2 break-all text-xs">
-                    Código de ativação preparado.
-                  </p>
+                  <div className="mt-3 p-2 bg-muted rounded text-xs">
+                    <p className="font-medium mb-1">⚠️ IMPORTANTE para iOS:</p>
+                    <p>Após adicionar à tela, se o app não ativar automaticamente, copie este link e abra no Safari antes de abrir o app:</p>
+                    <p className="mt-1 font-mono break-all text-[10px]">
+                      {window.location.href}
+                    </p>
+                  </div>
                 )}
               </div>
             </div>
@@ -547,6 +708,17 @@ const Setup: React.FC = () => {
               <div>
                 <h2 className="text-base font-semibold">Ops</h2>
                 <p className="text-sm text-destructive">{error}</p>
+                {error.includes('código de ativação') && (
+                  <div className="mt-2 p-2 bg-muted rounded text-xs">
+                    <p className="font-medium">Solução:</p>
+                    <ol className="list-decimal list-inside mt-1 space-y-1">
+                      <li>Feche completamente este app</li>
+                      <li>Abra o Safari e cole o link completo com ?code=...</li>
+                      <li>Aguarde carregar</li>
+                      <li>Abra o app novamente pela tela inicial</li>
+                    </ol>
+                  </div>
+                )}
               </div>
             </div>
             <div className="flex gap-2">

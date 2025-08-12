@@ -711,15 +711,6 @@ const Setup: React.FC = () => {
                     </div>
                   </div>
                 )}
-                {code && !installed && (
-                  <div className="mt-3 p-2 bg-muted rounded text-xs">
-                    <p className="font-medium mb-1">⚠️ IMPORTANTE para iOS:</p>
-                    <p>Após adicionar à tela, se o app não ativar automaticamente, copie este link e abra no Safari antes de abrir o app:</p>
-                    <p className="mt-1 font-mono break-all text-[10px]">
-                      {window.location.href}
-                    </p>
-                  </div>
-                )}
               </div>
             </div>
           </>
